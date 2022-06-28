@@ -1,0 +1,580 @@
+---
+title: "Infant mortality and economics 2022"
+author: "Glenn Ogolah"
+date: "02/03/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+
+```
+
+```{r, include=FALSE}
+#import libraries
+#install.packages("tidyverse")
+library(tidyverse)
+library(ggplot2)
+
+```
+
+
+```{r, include=FALSE}
+#upload data
+WB <- read.csv("world bank kenya data.csv") 
+
+```
+
+```{r, include=FALSE}
+
+#remove country name, country code and indicator code
+
+WB <- WB %>% dplyr::select(-c(`Country.Name`,`Country.Code`, `Indicator.Code`))
+
+#Remove X from column names identifying years
+colnames(WB)<-gsub("X","",colnames(WB))
+
+#Round all figures to 3 dp
+WB <-  WB %>% mutate_if(is.numeric, round, digits= 2)
+
+view(WB)
+```
+
+```{r, include=FALSE}
+#filter rows with interesting data only
+#interesting info: consumer price index, inflation, education, rural, urban, population, GNI, GDP, Trade, infant mortality, child death, child birth, %GDP, children, fertility rate
+
+
+WB1<- WB %>% dplyr::filter(grepl("consumer price index | inflation| education | population| rural | urban | GNI| GDP| Trade|mortality| death| birth| %GDP| children|infant| fertility rate",`Indicator.Name`, ignore.case = TRUE))
+
+#gross national expenditure started being tracked in 1964, kenya's independence
+#child mortality data is available consistently from 1960
+#data on education rate is inconsistent and mostly missing
+#Rural population data being left out by grepl, why? added a string for population to deal with this. Doubled the factors though.
+
+```
+
+
+```{r, include=FALSE}
+##Deal with NAs
+
+#https://drive.google.com/file/d/1s4zOnGzPOy_5McJ2rA8k8I_WYw4_avlh/view
+
+#what percentage of data is missing for each indicator?
+p <- function(x) {sum(is.na(x))/length(x)*100}
+#apply(WB1, 1, p) #1 is for rows, 2 for columns
+
+WB1 <- WB1 %>%  mutate(missprop = apply(WB1, 1, p))
+
+#filter factors with 15% or less missing data
+WB1<- WB1 %>% filter(missprop<=15) 
+
+
+```
+
+
+```{r, include=FALSE}
+##Replace missing values with mice imputation
+#https://drive.google.com/file/d/1s4zOnGzPOy_5McJ2rA8k8I_WYw4_avlh/view
+
+#our features are currently in the rows instead of columns. It will be necessary to transpose the dataframe before attempting imputation.
+
+##Transpose dataframe
+
+#install.packages("data.table")
+library(data.table)
+
+WB1<- t(WB1)
+
+#install.packages("janitor")
+library(janitor)
+WB1 <-WB1 %>% janitor::row_to_names(1) #make first row into column names
+
+#install.packages("VIM")
+#install.packages("mice")
+library(mice)
+library(VIM)
+
+#how do you carry out mice?
+#https://www.youtube.com/watch?v=MpnxwNXGV-E
+
+#md.pairs(WB1) #missing data per feature
+#impute <- mice(WB1, m= 5, method = "cart", seed = 42)
+         
+#Error in str2lang(x) : <text>:1:12: unexpected symbol : remove "-" from colnames first since sapply function in mice regards it as math operation
+
+#remove spaces in column names for mice!!!
+#https://stackoverflow.com/questions/64018471/when-using-mice-i-get-error-in-str2langx-text18-unexpected-symbol
+
+##Be sure to change object to data frame to be able to manipulate column names
+
+typeof(WB1)
+
+WB1 <- WB1 %>% as.data.frame()
+
+names(WB1)<- str_replace_all(names(WB1), " ","_")#remove spaces
+
+#Remove special characters from colnames
+#https://www.codingprof.com/5-easy-ways-to-replace-blanks-in-column-names-in-r-examples/
+
+
+WB1 <- clean_names(WB1)
+
+#Make the years a column
+WB1 <- cbind(rownames(WB1), data.frame(WB1, row.names=NULL)) %>% rename(Years=1)
+
+sapply(WB1, class) # all columns are character instead of numeric
+
+WB1<- WB1 %>% mutate_if(is.character,as.numeric)
+
+
+view(WB1)
+#impute <- mice(WB1, m= 5, seed = 42, remove.collinear = F)
+
+#there's a lot of collinearity in the data inhibiting use of mice. 
+#https://stackoverflow.com/questions/58666080/error-while-using-mice-function-nothing-left-to-impute
+
+```
+
+```{r, include=FALSE}
+
+#To get around collinearity we'll impute a moving average instead of MICE imputation
+
+##Convert data frame to TS object
+#install.packages("imputeTS")
+#install.packages("zoo")
+#install.packages("xts")
+#install.packages("tsibble")
+
+library(imputeTS)
+library(xts)
+library(zoo)
+library(tsibble)
+
+#converted dataframe to TS
+WB1ts <- ts(data = WB1, start=1960,
+            end= 2020,
+            frequency = 1)
+
+#Impute moving average
+WB1ts <- na.ma(WB1ts, k= 5, weighting = "simple", maxgap = 6)
+view(WB1ts)
+```
+
+
+```{r,include=FALSE}
+#select variables of interest
+
+#colnames(WB1ts)
+
+var_features1 <- c("Years",
+  "gross_national_expenditure_percent_of_gdp",
+  "consumer_price_index_2010_100",
+  "age_dependency_ratio_percent_of_working_age_population",
+  "gross_national_expenditure_percent_of_gdp",
+  "mortality_rate_under_5_per_1_000_live_births",
+  "rural_population_percent_of_total_population")
+
+WB1vars1 <- WB1ts[,var_features1] %>% as.data.frame()
+
+```
+
+```{r, include=FALSE}
+
+#convert features into timeseries objects
+
+#define national expenditure as timeseries object
+Nexp <- ts(WB1vars1$gross_national_expenditure_percent_of_gdp ,
+          start = 1960, 
+          end = 2013, 
+          frequency = 1)
+
+#define CPI as timeseries object
+CPI <- ts(WB1vars1$consumer_price_index_2010_100,
+          start = 1960,
+          end = 2013,
+          frequency = 1)
+#define age dependency ratio os ts object
+ADR <- ts(WB1vars1$age_dependency_ratio_percent_of_working_age_population,
+          start = 1960,
+          end = 2013,
+          frequency = 1)
+
+#define percentage of rural population as ts object
+RUR <- ts(WB1vars1$rural_population_percent_of_total_population,
+          start = 1960,
+          end = 2013,
+          frequency = 1)
+#define infant mortality rate as ts object
+MORT <- ts(WB1vars1$mortality_rate_under_5_per_1_000_live_births,
+          start = 1960,
+          end = 2013,
+          frequency = 1)
+WB1vars1 <- cbind(Nexp,ADR, CPI, RUR,MORT)
+
+Varsplot <-autoplot(WB1vars1)
+```
+
+```{r, include=FALSE}
+#Plot time series
+CPI_plot <- autoplot(CPI)
+ADR_plot <- autoplot(ADR)
+Nexp_plot <- autoplot(Nexp)
+RUR_plot <- autoplot(RUR)
+MORT_plot <- autoplot(MORT)
+```
+
+```{r}
+CPI_plot
+```
+
+
+```{r}
+ADR_plot
+```
+
+```{r}
+Nexp_plot
+```
+
+```{r}
+RUR_plot
+```
+
+```{r}
+MORT_plot
+```
+
+
+```{r, include=FALSE}
+#Split data into test and model data
+WB1ts_train <- WB1ts[1:49,]
+WB1ts_test <- WB1ts[50:nrow(WB1ts),]
+
+```
+
+```{r, include=FALSE}
+#check for stationary of individual time series
+library(tseries)
+adf1 <-adf.test(CPI)
+adf2<-adf.test(ADR)
+adf3<- adf.test(Nexp)
+adf4<- adf.test(RUR)
+adf5<- adf.test(MORT)
+
+# All tests have p>.05 indicating that the TS are non-stationary.
+#Difference each and plot new TS
+Nexp1 <- diff(Nexp)
+MORT1 <- diff(MORT)
+CPI1 <- diff(CPI)
+ADR1 <- diff(ADR)
+RUR1 <- diff(RUR)
+
+#check again for stationarity
+adf11 <-adf.test(CPI1)# still non-stationary
+adf21<-adf.test(ADR1) #still non-stationary
+adf31<- adf.test(Nexp1) #stationary
+adf41<- adf.test(RUR1) #still non-stationary
+adf51<- adf.test(MORT1)# still non-stationary
+
+
+#difference again
+Nexp2 <- diff(Nexp1)
+MORT2 <- diff(MORT1)
+CPI2 <- diff(CPI1)
+ADR2 <- diff(ADR1)
+RUR2 <- diff(RUR1)
+
+#check again for stationarity
+adf12 <-adf.test(CPI2)#stationary
+adf22<- adf.test(ADR2) #stationary
+adf32<- adf.test(Nexp2) #stationary
+adf42<- adf.test(RUR2) #still non-stationary
+adf52<- adf.test(MORT2)# still non-stationary
+
+#difference again
+Nexp3 <- diff(Nexp2)
+MORT3 <- diff(MORT2)
+CPI3 <- diff(CPI2)
+ADR3 <- diff(ADR2)
+RUR3 <- diff(RUR2)
+
+#check again for stationarity
+adf13 <-adf.test(CPI3)#stationary
+adf23<- adf.test(ADR3) #stationary
+adf33<-  adf.test(Nexp3) #stationary
+adf43<- adf.test(RUR3) #stationary
+adf53<- adf.test(MORT3)# still non-stationary
+
+#difference again
+Nexp4 <- diff(Nexp3)
+MORT4 <- diff(MORT3)
+CPI4 <- diff(CPI3)
+ADR4 <- diff(ADR3)
+RUR4 <- diff(RUR3)
+
+#check again for stationarity
+adf14 <-adf.test(CPI4)#stationary
+adf24<- adf.test(ADR4) #stationary
+adf34<-  adf.test(Nexp4) #stationary
+adf44<- adf.test(RUR4) #stationary
+adf54<- adf.test(MORT4)#stationary
+
+```
+
+```{r, include=FALSE}
+#create differenced dataframe
+WB_dif <- cbind(CPI4,RUR4, MORT4, Nexp4)
+
+
+```
+
+
+```{r, include=FALSE}
+#determine ideal lags
+#install.packages("vars")
+library(vars)
+lags <- VARselect(WB_dif)
+lags$selection #use 9 lags
+```
+```{r, include=FALSE}
+#build estimate equations
+varstim <- VAR(WB_dif, p= 9) #the model summary won't run with 10
+summary(varstim) # error stating the matrix is computationally singular. Probably a result of having too many variables. Dropping one fixes it. For the sake of time we'll drop age dependency ratio as Nexp as CPI can subtitute as a measure of economic conditions and wealth.
+
+roots(varstim, modulus = T) #estimates are unstable as many eigen values are above 1
+
+sum(is.na(varstim))# no missing values
+
+
+```
+
+
+
+```{r}
+autoplot(MORT4)
+```
+
+```{r}
+autoplot(Nexp4)
+```
+
+
+```{r}
+autoplot(CPI4)
+```
+
+
+```{r}
+autoplot(RUR4)
+```
+
+
+```{r, include=FALSE}
+#check Granger causality
+library(vars)
+gran1 <- causality(varstim, cause =c("CPI4", "Nexp4", "RUR4") )
+gran1$Granger #p<.05, fail to accept null hypothesis. CPI and Nexp do not granger cause infant mortality
+gran2 <- causality(varstim, cause =c("CPI4", "Nexp4", "MORT4") )
+gran2$Granger
+
+#Granger causality for multiple variables.
+#https://github.com/hegerty/ECON343/blob/main/CAVAR.R
+gctab<-NULL
+var<-WB_dif
+library(vars)
+var1<-VAR(var,type = c("const"),lag.max = 8,ic="SC")
+for(i in 1:3){
+   var2<-VAR(var[,c(i,4)],type = c("const"),lag.max = 8,ic="SC")
+  gc<-causality(var2,cause = colnames(var1$datamat[i]))
+  gc1<-cbind(as.numeric(gc$Granger$statistic),gc$Granger$p.value)
+  gctab<-rbind(gctab,gc1)
+}
+colnames(gctab)<-c("Statistic","p-val.")
+rownames(gctab)<-colnames(var1$datamat[c(1:3)])
+gctab<-round(gctab,3)
+
+
+```
+
+
+```{r}
+print(gctab)
+```
+
+
+
+```{r, include=FALSE}
+#Calculate PACF & ACF for TS
+acf_cpi <- acf(CPI4, main= "ACF for CPI")
+pacf_cpi<- pacf(CPI4, main= "PACF for CPI")
+
+acf_mort<- acf(MORT4, main= "ACF for MORT")
+pacf_mort <- pacf(MORT4, main= "PACF for MORT")
+
+acf_nexp<- acf(Nexp4, main= "ACF for Nexp")
+pacf_nexp <- pacf(Nexp4, main= "PACF for Nexp")
+```
+```{r, include=FALSE}
+#put this in a table
+#install.packages("stargazer")
+library(stargazer)
+```
+
+
+```{r, include=FALSE}
+#co-integration test
+ctest1 <- ca.jo(vars2, type = "trace", ecdet = "const", K = 9)
+summary(ctest1)
+```
+
+
+```{r,include=FALSE}
+#check impulse response function
+IRFun_cpi <- irf(varstim, impulse ="CPI4", 
+                 response = "MORT4", n.ahead = 20,
+                 boot = T, ci = .95)
+
+IRFun_rur <- irf(varstim, impulse ="RUR4", 
+                 response = "MORT4", n.ahead = 20,
+                 boot = T, ci = .95)
+
+IRFun_nexp <- irf(varstim, impulse ="Nexp4", 
+                 response = "MORT4", n.ahead = 20,
+                 boot = T, ci = .95)
+
+```
+
+
+```{r}
+#plot time series with fewer variables
+var2plot
+```
+
+```{r}
+#plot acf for icp
+plot(acf_cpi) 
+```
+
+```{r}
+plot(pacf_cpi) 
+```
+
+```{r}
+plot(acf_mort, main= "ACF for MORT")
+```
+
+
+```{r}
+plot(pcf_mort, main= "PACF for MORT")
+
+```
+
+```{r}
+plot(acf_nexp, main= "ACF for Nexp")
+```
+
+```{r}
+plot(pacf_nexp, main= "PACF for Nexp")
+#how to write up your var model https://www.youtube.com/watch?v=ITRO9tmFkmE
+```
+
+```{r}
+plot(IRFun_cpi, 
+     ylab= "CPI",
+     main= "Infact Mortality response to CPI shock")
+```
+
+```{r}
+plot(IRFun_rur, 
+     ylab= "Rural Population(%)",
+     main= "Infact Mortality response to % rural population ")
+```
+
+```{r}
+plot(IRFun_rur, 
+     ylab= "Rural Population(%)",
+     main= "Infact Mortality response to CPI Net GDP expenditure")
+```
+
+
+
+```{r, include=FALSE}
+##Build a model using XGboost
+
+#install.packages("Matrix")
+#install.packages("xgboost")
+#install.packages("caret")
+library(Matrix)
+library(xgboost)
+library(caret)
+
+#Create matrices for xgboost
+
+trainm <- sparse.model.matrix(
+  mortality_rate_under_5_per_1_000_live_births ~ . -1, 
+  data = WB1vars1)
+
+
+train_label <- WB1vars1[, "mortality_rate_under_5_per_1_000_live_births"]
+
+train_matrix <- xgb.DMatrix(data = as.matrix(trainm), label = train_label)
+
+#test data matrices
+
+WBT1test_a <- WB1ts_test[,var_features1] %>% as.data.frame()
+
+testm <- sparse.model.matrix(
+  mortality_rate_under_5_per_1_000_live_births ~ . -1, 
+  data = WBT1test_a)
+
+test_label <- WBT1test_a[, "mortality_rate_under_5_per_1_000_live_births"]
+
+testmatrix <- xgb.DMatrix(data = as.matrix(testm), label = test_label)
+
+#Specify parameters
+
+model_tune <- expand.grid(
+  nrounds = c(500,1000,1500), #number of trees
+  max_depth = c(2,4,6),
+  eta = 0.3, #c(0.025,0.05,0.1,0.3), #Learning rate
+  gamma = 0, # pruning --> Should be tuned. i.e c(0, 0.05, 0.1, 0.5, 0.7, 0.9, 1.0)
+  colsample_bytree = 1, # c(0.4, 0.6, 0.8, 1.0) subsample ratio of columns for tree
+  min_child_weight = 1, # c(1,2,3) # the larger, the more conservative the model
+  #is; can be used as a stop
+  subsample = 1 # c(0.5, 0.75, 1.0) # used to prevent overfitting by sampling X% training
+)
+
+#build model
+train_control <- trainControl(method = "cv",
+                              number=3,
+                              verboseIter = TRUE,
+                              allowParallel = TRUE)
+
+
+xgb_tune <- train(x = WB1vars1[,-6],
+                  y = WB1vars1[,6],
+                  trControl = train_control,
+                  tuneGrid = model_tune,
+                  method= "xgbTree",
+                  verbose = TRUE)
+
+xgbpred <- predict(xgb_tune, WBT1test_a)
+
+#check prediction
+mse = mean((WBT1test_a$mortality_rate_under_5_per_1_000_live_births - xgbpred)^2)
+mae = caret::MAE(WBT1test_a$mortality_rate_under_5_per_1_000_live_births, xgbpred)
+rmse = caret::RMSE(WBT1test_a$mortality_rate_under_5_per_1_000_live_births, xgbpred)
+
+#https://www.youtube.com/watch?v=QUp8EYNkHFU&t=48s&ab_channel=SpencerPao
+#https://github.com/SpencerPao/Data_Science/blob/main/XGBoost/XGBoost_Regression.R
+```
+
+
+```{r}
+##NEXT STEPS
+#try XGBoost & VAR in analysis
+#check results against test data
+```
+
